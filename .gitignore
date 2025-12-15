@@ -1,4 +1,8 @@
+# build
 /build
+/dist
+*.spec
+
 /__pycache__
 /test_2opt.py
 build_exe.py
