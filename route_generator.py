@@ -5,10 +5,23 @@ Implementa algoritmos nearest-neighbor e 2-opt para otimização de rotas.
 
 import googlemaps
 import os
+import sys
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+from reportlab.lib.units import inch
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # Load .env from the correct location for both development and PyInstaller
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller executable
+        env_path = os.path.join(sys._MEIPASS, '.env')
+    else:
+        # Running in development
+        env_path = '.env'
+    load_dotenv(env_path)
 except ImportError:
     # python-dotenv not installed; env vars must be set manually
     pass
@@ -17,6 +30,7 @@ import time
 import webbrowser
 import urllib.parse
 from datetime import datetime as dt
+from address_verifier import AddressVerifier
 
 
 # =============================================================================
@@ -347,6 +361,8 @@ class RouteGenerator:
         self.google_api_key = api_key
         self.gmaps = googlemaps.Client(key=api_key)
         self.fixed_start = "STC Transportes, Fortaleza, CE"
+        self.address_verifier = AddressVerifier(google_api_key=api_key)
+        self.last_verification_report = None
     
     def format_address_for_api(self, address_dict):
         """
@@ -526,6 +542,13 @@ class RouteGenerator:
                 'error': f"Erro na API do Google: {google_matrix['status']}"
             }
         
+        # Verifica como o Google interpretou os endereços
+        if progress_callback:
+            progress_callback("Verificando interpretação dos endereços...", 35)
+        
+        self.address_verifier.clear_log()
+        verifications = self.address_verifier.verify_addresses_batch(all_locations, [None] + addresses)
+        
         if progress_callback:
             progress_callback("Otimizando rota (nearest-neighbor)...", 40)
         
@@ -674,7 +697,11 @@ class RouteGenerator:
                 if not stop['is_start'] and stop['original_data']
             ]
         else:
-            # Usa ordem original
+            # Usa ordem original e verifica endereços
+            self.address_verifier.clear_log()
+            formatted_addresses = [self.format_address_for_api(addr) for addr in addresses]
+            all_locations = [self.fixed_start] + formatted_addresses
+            self.address_verifier.verify_addresses_batch(all_locations, [None] + addresses)
             ordered_addresses = addresses
         
         # Formata endereços
@@ -764,19 +791,24 @@ class RouteGenerator:
 
         return url
     
-    def save_route_to_file(self, addresses, optimize=False):
+    def save_route_to_file(self, addresses, optimize=False, filepath=None, summary=None):
         """
-        Salva a rota em um arquivo de texto.
+        Salva a rota e relatório de verificação em um arquivo PDF.
         
         Args:
             addresses: Lista de dicionários de endereços
             optimize: Se True, usa rota otimizada; se False, usa ordem original
+            filepath: Caminho completo do arquivo (opcional). Se não fornecido, gera nome automático
+            summary: Dicionário com resumo da verificação de endereços (opcional)
         
         Returns:
-            str: Nome do arquivo salvo
+            str: Caminho completo do arquivo salvo
         """
         if not addresses:
             raise ValueError("Nenhum endereço fornecido")
+        
+        # Preparar dados da rota
+        route_data = []
         
         if optimize:
             # Gera rota otimizada
@@ -785,58 +817,130 @@ class RouteGenerator:
             if route_result.get('error'):
                 raise Exception(route_result['error'])
             
-            # Monta conteúdo do arquivo
-            lines = []
-            lines.append("=" * 70)
-            lines.append("ROTA OTIMIZADA - GERADA AUTOMATICAMENTE")
-            lines.append(f"Data: {dt.now().strftime('%d/%m/%Y %H:%M:%S')}")
-            lines.append("=" * 70)
-            lines.append(f"\nTotal de paradas: {route_result['num_stops']}")
-            lines.append(f"Distância total: {route_result['total_distance_km']} km")
-            lines.append(f"Tempo estimado: {route_result['total_duration_min']} minutos")
-            lines.append("\n" + "=" * 70)
-            lines.append("SEQUÊNCIA DE PARADAS:")
-            lines.append("=" * 70)
+            route_data.append(("ROTA OTIMIZADA - GERADA AUTOMATICAMENTE", True))
+            route_data.append((f"Data: {dt.now().strftime('%d/%m/%Y %H:%M:%S')}", False))
+            route_data.append((f"Total de paradas: {route_result['num_stops']}", False))
+            route_data.append((f"Distância total: {route_result['total_distance_km']} km", False))
+            route_data.append((f"Tempo estimado: {route_result['total_duration_min']} minutos", False))
+            route_data.append(("", False))
+            route_data.append(("SEQUÊNCIA DE PARADAS:", True))
             
             for i, stop in enumerate(route_result['route'], 1):
                 if stop['is_start']:
-                    lines.append(f"\n{i}. [PONTO DE PARTIDA/RETORNO]")
-                    lines.append(f"    {stop['address']}")
+                    route_data.append((f"{i}. [PONTO DE PARTIDA/RETORNO]", False))
                 else:
-                    lines.append(f"\n{i}. PARADA {i-1}")
-                    lines.append(f"    {stop['address']}")
-            
-            lines.append("\n" + "=" * 70)
+                    route_data.append((f"{i}. {stop['address']}", False))
             
         else:
             # Rota sequencial (ordem original)
-            lines = []
-            lines.append("=" * 70)
-            lines.append("ROTA SEQUENCIAL - ORDEM ORIGINAL")
-            lines.append(f"Data: {dt.now().strftime('%d/%m/%Y %H:%M:%S')}")
-            lines.append("=" * 70)
-            lines.append(f"\nTotal de paradas: {len(addresses)}")
-            lines.append("\n" + "=" * 70)
-            lines.append("SEQUÊNCIA DE PARADAS:")
-            lines.append("=" * 70)
+            # Verify addresses even for sequential routes
+            self.address_verifier.clear_log()
+            formatted_addresses = [self.format_address_for_api(addr) for addr in addresses]
+            all_locations = [self.fixed_start] + formatted_addresses
+            self.address_verifier.verify_addresses_batch(all_locations, [None] + addresses)
             
-            lines.append(f"\n1. [PONTO DE PARTIDA/RETORNO]")
-            lines.append(f"    {self.fixed_start}")
+            route_data.append(("ROTA SEQUENCIAL - ORDEM ORIGINAL", True))
+            route_data.append((f"Data: {dt.now().strftime('%d/%m/%Y %H:%M:%S')}", False))
+            route_data.append((f"Total de paradas: {len(addresses)}", False))
+            route_data.append(("", False))
+            route_data.append(("SEQUÊNCIA DE PARADAS:", True))
+            route_data.append((f"1. [PONTO DE PARTIDA/RETORNO]", False))
+            route_data.append((f"    {self.fixed_start}", False))
             
             for i, addr in enumerate(addresses, 2):
-                lines.append(f"\n{i}. PARADA {i-1}")
-                lines.append(f"    {self.format_address_for_api(addr)}")
+                route_data.append((f"{i}. {self.format_address_for_api(addr)}", False))
             
-            lines.append(f"\n{len(addresses) + 2}. [RETORNO]")
-            lines.append(f"    {self.fixed_start}")
-            
-            lines.append("\n" + "=" * 70)
+            route_data.append((f"{len(addresses) + 2}. [RETORNO]", False))
+            route_data.append((f"    {self.fixed_start}", False))
         
-        # Salva arquivo
-        timestamp = dt.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"rota_{'otimizada' if optimize else 'sequencial'}_{timestamp}.txt"
+        # Determinar caminho do arquivo
+        if not filepath:
+            # Auto-generate filename if not provided
+            timestamp = dt.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"rota_{'otimizada' if optimize else 'sequencial'}_{timestamp}.pdf"
+        else:
+            filename = filepath
+            # Garantir que tem extensão .pdf
+            if not filename.lower().endswith('.pdf'):
+                filename = filename.replace('.txt', '') + '.pdf'
         
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(lines))
+        # Criar PDF
+        doc = SimpleDocTemplate(filename, pagesize=A4, topMargin=0.5*inch, bottomMargin=0.5*inch)
+        story = []
+        styles = getSampleStyleSheet()
+        
+        # Estilo customizado para título
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=14,
+            textColor=colors.HexColor('#1f4788'),
+            spaceAfter=12,
+            fontName='Helvetica-Bold'
+        )
+        
+        body_style = ParagraphStyle(
+            'CustomBody',
+            parent=styles['BodyText'],
+            fontSize=10,
+            leading=12,
+            fontName='Helvetica'
+        )
+        
+        # Adicionar dados da rota ao PDF
+        for text, is_heading in route_data:
+            if text == "":
+                story.append(Spacer(1, 0.2*inch))
+            elif is_heading:
+                story.append(Paragraph(text, title_style))
+            else:
+                story.append(Paragraph(text, body_style))
+        
+        # (Verification report removed by user request)
+        
+        # Gerar PDF
+        doc.build(story)
         
         return filename
+    
+    def get_problematic_addresses(self) -> list:
+        """
+        Retorna lista de endereços que o Google interpretou de forma problemática.
+        
+        Returns:
+            list: Lista de verificações com problemas
+        """
+        return self.address_verifier.get_problematic_addresses()
+    
+    def get_verification_summary(self) -> dict:
+        """
+        Retorna um resumo das verificações de endereços.
+        
+        Returns:
+            dict: Resumo com estatísticas das verificações
+        """
+        verifications = self.address_verifier.verification_log
+        
+        if not verifications:
+            return {
+                'total': 0,
+                'ok': 0,
+                'not_found': 0,
+                'errors': 0,
+                'with_alerts': 0,
+                'problematic': []
+            }
+        
+        ok_count = sum(1 for v in verifications if v['status'] == 'OK')
+        not_found = sum(1 for v in verifications if v['status'] == 'NOT_FOUND')
+        errors = sum(1 for v in verifications if v['status'] == 'ERROR')
+        with_alerts = sum(1 for v in verifications if v.get('alerts'))
+        
+        return {
+            'total': len(verifications),
+            'ok': ok_count,
+            'not_found': not_found,
+            'errors': errors,
+            'with_alerts': with_alerts,
+            'problematic': self.get_problematic_addresses()
+        }

@@ -4,10 +4,18 @@ Módulo para processar PDFs usando OCR Space API.
 
 import requests
 import os
+import sys
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # Load .env from the correct location for both development and PyInstaller
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller executable
+        env_path = os.path.join(sys._MEIPASS, '.env')
+    else:
+        # Running in development
+        env_path = '.env'
+    load_dotenv(env_path)
 except ImportError:
     # python-dotenv not installed; env vars must be set manually
     pass

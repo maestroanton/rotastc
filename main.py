@@ -3,13 +3,13 @@ Aplicação para processar PDFs e criar rotas.
 """
 
 import sys
-from PyQt6.QtWidgets import QApplication, QMessageBox, QDialog
+from PyQt6.QtWidgets import QApplication, QMessageBox, QDialog, QFileDialog
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 from stc_common.ui.dialogs import DialogManager
 from address_extractor import AddressExtractor
 from route_generator import RouteGenerator
-from dialog import AddressSelectionDialog
+from address_verifier import AddressSelectionDialog
 
 # Initialize dialog manager
 dialog_manager = DialogManager()
@@ -20,7 +20,7 @@ def show_results_dialog(text, addresses, extractor, route_generator):
     
     if addresses:
         # Show address selection dialog first
-        selection_dialog = AddressSelectionDialog(addresses, extractor)
+        selection_dialog = AddressSelectionDialog(addresses, extractor.format_address)
         if selection_dialog.exec() != QDialog.DialogCode.Accepted:
             return QMessageBox.StandardButton.Cancel
         
@@ -79,28 +79,79 @@ def show_results_dialog(text, addresses, extractor, route_generator):
         try:
             if clicked_button == open_browser_btn:
                 urls = route_generator.open_route_in_browser(addresses, optimize=optimize)
+                
+                # Check for verification results after route generation
+                summary = route_generator.get_verification_summary()
+                
                 info_msg = QMessageBox()
                 info_msg.setIcon(QMessageBox.Icon.Information)
                 if icon_path:
                     info_msg.setWindowIcon(QIcon(icon_path))
                 info_msg.setWindowTitle("Rota Criada")
                 
+                # Build message
                 if isinstance(urls, list):
                     info_msg.setText(f"{len(urls)} rotas {'otimizadas' if optimize else 'sequenciais'} abertas no navegador!\n\n(Rota dividida devido ao limite do Google Maps)")
                     url_text = '\n\n'.join([f"Rota {i+1}:\n{url}" for i, url in enumerate(urls)])
-                    info_msg.setDetailedText(url_text)
                 else:
                     info_msg.setText(f"Rota {'otimizada' if optimize else 'sequencial'} aberta no navegador!")
-                    info_msg.setDetailedText(f"URL da rota:\n{urls}")
+                    url_text = f"URL da rota:\n{urls}"
+                
+                # Add verification report if there are issues
+                if summary['problematic']:
+                    report_details = [url_text, "\n" + "="*60 + "\n"]
+                    report_details.append("Enderecos identificados na verificacao:")
+                    for prob in summary['problematic']:
+                        report_details.append(f"\nOriginal: {prob['original_address']}")
+                        report_details.append(f"Interpretado: {prob.get('interpreted_address', 'N/A')}")
+                        if prob.get('alerts'):
+                            for alert in prob['alerts']:
+                                report_details.append(f"  - {alert}")
+                    
+                    info_msg.setDetailedText('\n'.join(report_details))
+                else:
+                    info_msg.setDetailedText(url_text)
+                
                 info_msg.exec()
+                
             elif clicked_button == save_file_btn:
-                filename = route_generator.save_route_to_file(addresses, optimize=optimize)
+                # Ask user where to save the file
+                default_filename = f"rota_{'otimizada' if optimize else 'sequencial'}.pdf"
+                filepath, _ = QFileDialog.getSaveFileName(
+                    action_msg,
+                    "Salvar Rota Como",
+                    default_filename,
+                    "PDF Files (*.pdf);;Text Files (*.txt);;All Files (*)"
+                )
+                
+                if not filepath:
+                    return QMessageBox.StandardButton.Cancel
+                
+                # Get verification summary
+                summary = route_generator.get_verification_summary()
+                
+                filename = route_generator.save_route_to_file(addresses, optimize=optimize, filepath=filepath, summary=summary)
+                
+                # Check for verification results after route generation
+                summary = route_generator.get_verification_summary()
+                
                 info_msg = QMessageBox()
                 info_msg.setIcon(QMessageBox.Icon.Information)
                 if icon_path:
                     info_msg.setWindowIcon(QIcon(icon_path))
                 info_msg.setWindowTitle("Rota Salva")
+                
                 info_msg.setText(f"Rota {'otimizada' if optimize else 'sequencial'} salva em:\n{filename}")
+                
+                # Add verification details if there are problematic addresses
+                if summary['problematic']:
+                    details = [f"Arquivo da rota: {filename}\n", "="*60, "\nEnderecos identificados na verificacao:"]
+                    for prob in summary['problematic']:
+                        details.append(f"\nOriginal: {prob['original_address']}")
+                        details.append(f"Interpretado: {prob.get('interpreted_address', 'N/A')}")
+                    
+                    info_msg.setDetailedText('\n'.join(details))
+                
                 info_msg.exec()
         except Exception as e:
             error_msg = QMessageBox()
